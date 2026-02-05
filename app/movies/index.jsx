@@ -126,11 +126,15 @@ export default function MoviesAppScreen() {
   const [query, setQuery] = useState("");
   const [hasSearched, setHasSearched] = useState(false);
   const [searchError, setSearchError] = useState("");
+  const [searchCompleted, setSearchCompleted] = useState(false);
+  const [searchPageLoading, setSearchPageLoading] = useState(false);
+  const searchRequestIdRef = useRef(0);
 
   const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState("");
   const [results, setResults] = useState([]);
   const [totalResults, setTotalResults] = useState(0);
+  const [pageChanging] = useState(false);
 
   // Bonus pagination: 10 per page (local slice of the response)
   const perPage = 10;
@@ -145,6 +149,26 @@ export default function MoviesAppScreen() {
 
   function resetPaging() {
     setPageIndex(1);
+  }
+
+  function goToPage(nextPage) {
+    const isMultiSearch = activeTab === TAB_KEYS.search && searchType === "multi";
+    if (activeTab === TAB_KEYS.search && searchPageLoading) {
+      return;
+    }
+    if (isMultiSearch) {
+      const store = multiStoreRef.current;
+      const maxLoadedPages = Math.max(1, Math.ceil(store.items.length / perPage));
+      const hasMore = store.nextPage <= store.totalPages;
+      if (nextPage > maxLoadedPages && !hasMore) {
+        return;
+      }
+    }
+    if (activeTab === TAB_KEYS.search) {
+      setSearchCompleted(false);
+      setSearchPageLoading(true);
+    }
+    setPageIndex(nextPage);
   }
 
   const multiStoreRef = useRef({
@@ -192,16 +216,16 @@ export default function MoviesAppScreen() {
     }
   }
 
-  const multiRequestIdRef = useRef(0);
-
   async function loadSearch(localPage = pageIndex) {
     const q = query.trim();
     if (!q) return;
+    const searchRequestId = ++searchRequestIdRef.current;
     setLoading(true);
     setApiError("");
+    setSearchCompleted(false);
+    setSearchPageLoading(true);
     try {
       if (searchType === "multi") {
-        const requestId = ++multiRequestIdRef.current;
         const store = multiStoreRef.current;
         if (store.query !== q) {
           store.query = q;
@@ -215,7 +239,7 @@ export default function MoviesAppScreen() {
         const fetchNextPage = async () => {
           if (store.nextPage > store.totalPages) return false;
           const data = await fetchSearch(searchType, q, store.nextPage);
-          if (requestId !== multiRequestIdRef.current) return false;
+          if (searchRequestId !== searchRequestIdRef.current) return false;
           store.totalPages = Math.max(1, Number(data?.total_pages || 1));
           store.totalResults = Number(data?.total_results || 0);
           const filtered = Array.isArray(data?.results)
@@ -230,14 +254,24 @@ export default function MoviesAppScreen() {
           await fetchNextPage();
         }
 
-        if (requestId !== multiRequestIdRef.current) return;
+        if (searchRequestId !== searchRequestIdRef.current) return;
         const start = (localPage - 1) * perPage;
         const pageSlice = store.items.slice(start, start + perPage);
         const hasMore = store.nextPage <= store.totalPages;
         const estimatedTotal = hasMore ? Math.max(store.items.length, localPage * perPage + 1) : store.items.length;
         setResults(pageSlice);
-        setTotalResults(store.totalResults || estimatedTotal);
+        setTotalResults(estimatedTotal);
         setLoading(false);
+        if (!hasMore) {
+          const maxPage = Math.max(1, Math.ceil(store.items.length / perPage));
+          if (localPage > maxPage) {
+            setPageIndex(maxPage);
+          }
+        }
+        if (pageSlice.length > 0 || !hasMore) {
+          setSearchCompleted(true);
+          setSearchPageLoading(false);
+        }
 
         if (store.items.length < targetEnd && store.nextPage <= store.totalPages) {
           (async () => {
@@ -245,30 +279,45 @@ export default function MoviesAppScreen() {
               const ok = await fetchNextPage();
               if (!ok) return;
             }
-            if (requestId !== multiRequestIdRef.current) return;
+            if (searchRequestId !== searchRequestIdRef.current) return;
             const updatedSlice = store.items.slice(start, start + perPage);
             const hasMoreLater = store.nextPage <= store.totalPages;
             const updatedTotal = hasMoreLater
               ? Math.max(store.items.length, localPage * perPage + 1)
               : store.items.length;
             setResults(updatedSlice);
-            setTotalResults(store.totalResults || updatedTotal);
+            setTotalResults(updatedTotal);
+            if (!hasMoreLater) {
+              const maxPage = Math.max(1, Math.ceil(store.items.length / perPage));
+              if (localPage > maxPage) {
+                setPageIndex(maxPage);
+              }
+            }
+            if (updatedSlice.length > 0 || !hasMoreLater) {
+              setSearchCompleted(true);
+              setSearchPageLoading(false);
+            }
           })();
         }
         return;
       }
       const tmdbPage = Math.max(1, Math.ceil(localPage / 2));
       const data = await fetchSearch(searchType, q, tmdbPage);
+      if (searchRequestId !== searchRequestIdRef.current) return;
       const all = Array.isArray(data?.results) ? data.results : [];
       const sliceStart = localPage % 2 === 1 ? 0 : perPage;
       setResults(all.slice(sliceStart, sliceStart + perPage));
       setTotalResults(Number(data?.total_results || 0));
     } catch (e) {
+      if (searchRequestId !== searchRequestIdRef.current) return;
       setApiError("Failed to search. Check your TMDB API key.");
       setResults([]);
       setTotalResults(0);
     } finally {
+      if (searchRequestId !== searchRequestIdRef.current) return;
       setLoading(false);
+      setSearchCompleted(true);
+      setSearchPageLoading(false);
     }
   }
 
@@ -281,6 +330,7 @@ export default function MoviesAppScreen() {
       else {
         setResults([]);
         setTotalResults(0);
+        setSearchCompleted(false);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -292,14 +342,8 @@ export default function MoviesAppScreen() {
   }, [searchType, pageIndex]);
 
   const showSearchPrompt = activeTab === TAB_KEYS.search && !hasSearched;
-  const pagePair = useMemo(() => {
-    if (totalPages <= 1) return [1];
-    if (totalPages === 2) return [1, 2];
-    const pairStart = Math.floor((pageIndex - 1) / 2) * 2 + 1;
-    const pairEnd = Math.min(totalPages, pairStart + 1);
-    return pairStart === pairEnd ? [pairStart] : [pairStart, pairEnd];
-  }, [pageIndex, totalPages]);
-
+  const isSearchLoading =
+    activeTab === TAB_KEYS.search && hasSearched && (loading || searchPageLoading || !searchCompleted);
   return (
     <View className="flex-1 bg-gray-50">
       <View className="bg-slate-700 pt-5 pb-5 items-center">
@@ -402,8 +446,10 @@ export default function MoviesAppScreen() {
                       return;
                     }
                     setSearchError("");
+                    setSearchCompleted(false);
                     setHasSearched(true);
-                    setPageIndex(1);
+                    setSearchPageLoading(true);
+                    goToPage(1);
                     await loadSearch(1);
                   }}
                 >
@@ -429,6 +475,10 @@ export default function MoviesAppScreen() {
       {showSearchPrompt ? (
         <View className="flex-1  justify-center px-8 ">
           <Text className="text-2xl font-semibold text-gray-800 text-center ">Please initiate a search.</Text>
+        </View>
+      ) : isSearchLoading ? (
+        <View className="flex-1 items-center justify-center">
+          <ActivityIndicator size="large" color="#06b6d4" />
         </View>
       ) : loading ? (
         <View className="flex-1 items-center justify-center">
@@ -457,8 +507,12 @@ export default function MoviesAppScreen() {
               />
             );
           }}
-          ListEmptyComponent={
-            activeTab === TAB_KEYS.search && !hasSearched ? null : (
+          ListEmptyComponent={() =>
+            isSearchLoading ? (
+              <View className="px-5 py-[130px] items-center">
+                <ActivityIndicator size="large" color="#06b6d4" />
+              </View>
+            ) : activeTab === TAB_KEYS.search && !hasSearched ? null : (
               <View className="px-5 py-[130px] items-center">
                 <Text className="text-gray-500 text-2xl">No results found.</Text>
               </View>
@@ -467,49 +521,35 @@ export default function MoviesAppScreen() {
         />
       )}
 
-      {totalPages > 1 && totalResults > 0 && !loading && !showSearchPrompt ? (
-        <View className="pb-4 pt-4 items-center">
-          <View className="relative" style={{ height: 40, justifyContent: "center" }}>
+      {totalPages > 1 && totalResults > 0 && !showSearchPrompt ? (
+        <View className="pb-4 pt-4 px-6 bg-gray-200">
+          <View className="flex-row items-center justify-between">
             {pageIndex > 1 ? (
               <Pressable
-                onPress={() => setPageIndex(pageIndex - 1)}
-                className="px-2 py-2"
-                style={{ position: "absolute", left: -28 }}
+                onPress={() => goToPage(pageIndex - 1)}
+                className="px-4 py-3 rounded border border-gray-300 bg-white"
+                style={{
+                  opacity: pageChanging || loading || (activeTab === TAB_KEYS.search && searchPageLoading) ? 0.4 : 1,
+                }}
+                disabled={pageChanging || loading || (activeTab === TAB_KEYS.search && searchPageLoading)}
               >
-                <FontAwesome name="chevron-left" size={18} color="#6b7280" />
+                <Text style={{ color: "#111827", fontWeight: "600" }}>Previous</Text>
               </Pressable>
-            ) : null}
+            ) : (
+              <View />
+            )}
             {pageIndex < totalPages ? (
               <Pressable
-                onPress={() => setPageIndex(pageIndex + 1)}
-                className="px-2 py-2"
-                style={{ position: "absolute", right: -28 }}
+                onPress={() => goToPage(pageIndex + 1)}
+                className="px-4 py-3 rounded border border-cyan-500 bg-cyan-500"
+                style={{
+                  opacity: pageChanging || loading || (activeTab === TAB_KEYS.search && searchPageLoading) ? 0.4 : 1,
+                }}
+                disabled={pageChanging || loading || (activeTab === TAB_KEYS.search && searchPageLoading)}
               >
-                <FontAwesome name="chevron-right" size={18} color="#6b7280" />
+                <Text style={{ color: "#ffffff", fontWeight: "700" }}>Next</Text>
               </Pressable>
             ) : null}
-            <View className="flex-row items-center justify-center">
-              {pagePair.map((n, idx) => {
-                const active = n === pageIndex;
-                return (
-                  <Pressable
-                    key={`${n}-${idx}`}
-                    onPress={() => setPageIndex(n)}
-                    className="px-3 py-2 rounded"
-                    style={{
-                      backgroundColor: active ? "#06b6d4" : "#ffffff",
-                      borderWidth: 1,
-                      borderColor: active ? "#06b6d4" : "#d1d5db",
-                      marginHorizontal: 4,
-                    }}
-                  >
-                    <Text style={{ color: active ? "#ffffff" : "#111827", fontWeight: "700" }}>
-                      {n}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
           </View>
         </View>
       ) : null}
