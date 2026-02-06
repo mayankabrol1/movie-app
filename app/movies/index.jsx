@@ -38,25 +38,6 @@ function getTitle(item) {
   return item?.title || item?.name || item?.original_title || item?.original_name || "Untitled";
 }
 
-/** Keep only results whose primary title/name contains the search query (case-insensitive). */
-function primaryTitleMatchesQuery(item, query, searchType) {
-  const q = (query || "").trim().toLowerCase();
-  if (!q) return true;
-  let primary;
-  if (searchType === "multi") {
-    if (item.media_type === "movie") primary = item.title || item.original_title || "";
-    else if (item.media_type === "tv") primary = item.name || item.original_name || "";
-    else return false;
-  } else if (searchType === "movie") {
-    primary = item.title || item.original_title || "";
-  } else if (searchType === "tv") {
-    primary = item.name || item.original_name || "";
-  } else {
-    return true;
-  }
-  return (primary || "").toLowerCase().includes(q);
-}
-
 function getDate(item) {
   return item?.release_date || item?.first_air_date || "";
 }
@@ -171,17 +152,8 @@ export default function MoviesAppScreen() {
   }
 
   function goToPage(nextPage) {
-    const isMultiSearch = activeTab === TAB_KEYS.search && searchType === "multi";
     if (activeTab === TAB_KEYS.search && searchPageLoading) {
       return;
-    }
-    if (isMultiSearch) {
-      const store = multiStoreRef.current;
-      const maxLoadedPages = Math.max(1, Math.ceil(store.items.length / perPage));
-      const hasMore = store.nextPage <= store.totalPages;
-      if (nextPage > maxLoadedPages && !hasMore) {
-        return;
-      }
     }
     if (activeTab === TAB_KEYS.search) {
       setSearchCompleted(false);
@@ -189,13 +161,6 @@ export default function MoviesAppScreen() {
     }
     setPageIndex(nextPage);
   }
-
-  const multiStoreRef = useRef({
-    query: "",
-    items: [],
-    nextPage: 1,
-    totalPages: 1,
-  });
 
   async function loadMovies(localPage = pageIndex) {
     setLoading(true);
@@ -244,92 +209,10 @@ export default function MoviesAppScreen() {
     setSearchCompleted(false);
     setSearchPageLoading(true);
     try {
-      if (searchType === "multi") {
-        const store = multiStoreRef.current;
-        if (store.query !== q) {
-          store.query = q;
-          store.items = [];
-          store.nextPage = 1;
-          store.totalPages = 1;
-          store.totalResults = 0;
-        }
-
-        const targetEnd = localPage * perPage;
-        const fetchNextPage = async () => {
-          if (store.nextPage > store.totalPages) return false;
-          const data = await fetchSearch(searchType, q, store.nextPage);
-          if (searchRequestId !== searchRequestIdRef.current) return false;
-          store.totalPages = Math.max(1, Number(data?.total_pages || 1));
-          store.totalResults = Number(data?.total_results || 0);
-          const filtered = Array.isArray(data?.results)
-            ? data.results.filter(
-                (r) =>
-                  (r.media_type === "movie" || r.media_type === "tv") &&
-                  primaryTitleMatchesQuery(r, q, "multi")
-              )
-            : [];
-          store.items = store.items.concat(filtered);
-          store.nextPage += 1;
-          return true;
-        };
-
-        if (store.items.length < targetEnd) {
-          await fetchNextPage();
-        }
-
-        if (searchRequestId !== searchRequestIdRef.current) return;
-        const start = (localPage - 1) * perPage;
-        const pageSlice = store.items.slice(start, start + perPage);
-        const hasMore = store.nextPage <= store.totalPages;
-        const estimatedTotal = hasMore ? Math.max(store.items.length, localPage * perPage + 1) : store.items.length;
-        setResults(pageSlice);
-        setTotalResults(estimatedTotal);
-        setLoading(false);
-        if (!hasMore) {
-          const maxPage = Math.max(1, Math.ceil(store.items.length / perPage));
-          if (localPage > maxPage) {
-            setPageIndex(maxPage);
-          }
-        }
-        if (pageSlice.length > 0 || !hasMore) {
-          setSearchCompleted(true);
-          setSearchPageLoading(false);
-        }
-
-        if (store.items.length < targetEnd && store.nextPage <= store.totalPages) {
-          (async () => {
-            while (store.items.length < targetEnd && store.nextPage <= store.totalPages) {
-              const ok = await fetchNextPage();
-              if (!ok) return;
-            }
-            if (searchRequestId !== searchRequestIdRef.current) return;
-            const updatedSlice = store.items.slice(start, start + perPage);
-            const hasMoreLater = store.nextPage <= store.totalPages;
-            const updatedTotal = hasMoreLater
-              ? Math.max(store.items.length, localPage * perPage + 1)
-              : store.items.length;
-            setResults(updatedSlice);
-            setTotalResults(updatedTotal);
-            if (!hasMoreLater) {
-              const maxPage = Math.max(1, Math.ceil(store.items.length / perPage));
-              if (localPage > maxPage) {
-                setPageIndex(maxPage);
-              }
-            }
-            if (updatedSlice.length > 0 || !hasMoreLater) {
-              setSearchCompleted(true);
-              setSearchPageLoading(false);
-            }
-          })();
-        }
-        return;
-      }
       const tmdbPage = Math.max(1, Math.ceil(localPage / 2));
       const data = await fetchSearch(searchType, q, tmdbPage);
       if (searchRequestId !== searchRequestIdRef.current) return;
-      const all = Array.isArray(data?.results)
-        ? data.results.filter((r) => primaryTitleMatchesQuery(r, q, searchType))
-        : [];
+      const all = Array.isArray(data?.results) ? data.results : [];
       const sliceStart = localPage % 2 === 1 ? 0 : perPage;
       setResults(all.slice(sliceStart, sliceStart + perPage));
       setTotalResults(Number(data?.total_results || 0));
@@ -350,7 +233,6 @@ export default function MoviesAppScreen() {
     if (activeTab === TAB_KEYS.movies) loadMovies();
     if (activeTab === TAB_KEYS.tv) loadTv();
     if (activeTab === TAB_KEYS.search) {
-      
       if (hasSearched && query.trim()) loadSearch();
       else {
         setResults([]);
@@ -358,12 +240,10 @@ export default function MoviesAppScreen() {
         setSearchCompleted(false);
       }
     }
-    
   }, [activeTab, movieType, tvType, pageIndex]);
 
   useEffect(() => {
     if (activeTab === TAB_KEYS.search && hasSearched && query.trim()) loadSearch();
-    
   }, [searchType, pageIndex]);
 
   const showSearchPrompt = activeTab === TAB_KEYS.search && !hasSearched;
